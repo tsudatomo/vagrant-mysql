@@ -1,0 +1,82 @@
+---
+- name: vagrant ansible for mysql setup
+  hosts: all
+  become: yes
+  vars:
+    github: <GITHUB_ACCOUNT>
+    mysql_user: user01
+    mysql_pass: hoge
+    repl_host: 192.168.33.180
+    repl_user: repl
+    repl_pass: myrepl
+
+  tasks:
+    - name: disable apparmor
+      service: name=apparmor state=stopped enabled=no
+      ignore_errors: True
+
+    - name: remove apparmor
+      apt: name=apparmor state=absent
+
+    - name: authorized settings
+      authorized_key: user=vagrant key="https://github.com/{{ github }}.keys"
+
+    - name: install MySQL server
+      apt: name={{ item }} state=latest
+      with_items:
+        - mysql-server-5.6
+        - mysql-client-5.6
+        - libmysqlclient-dev
+        - python-mysqldb
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+    
+    - name: create data directory
+      file: path=/db state=directory owner=root group=root mode=0755
+    
+    - name: put my.cnf
+      template: src=my.cnf.j2 dest=/etc/mysql/my.cnf owner=root group=root mode=0755
+
+    - name: restart mysql
+      service: name=mysql state=restarted
+
+    - name: create database for sample
+      mysql_db: name=sample_vagrantdb state=present
+    
+    - name: create user
+      mysql_user: name={{ mysql_user }} password={{ mysql_pass }} priv=*.*:ALL state=present host="192.168.33.%" 
+
+    - name: create replication user
+      mysql_user: name={{ repl_user }} password={{ repl_pass }} host="192.168.33.%" priv="*.*:REPLICATION SLAVE" state=present
+      when: mode == "master"
+
+    - name: Check if slave is already configured for replication
+      mysql_replication: mode=getslave
+      register: slave
+      ignore_errors: True
+
+    - name: Get the current master servers replication status
+      mysql_replication: mode=getmaster
+      register: repl_stat
+      remote_user: vagrant
+      delegate_to: "{{ repl_host }}"
+      when: slave.Is_Slave == false and mode == "slave"
+      ignore_errors: True
+    
+    - name: set replication
+      mysql_replication:
+        mode=changemaster
+        master_host={{ repl_host }}
+        master_log_file={{ repl_stat.File }}
+        master_log_pos={{ repl_stat.Position }} 
+        master_user={{ repl_user }}
+        master_password={{ repl_pass }}
+      when: slave.Is_Slave == false and mode == "slave"
+      notify: start slave
+
+  handlers:
+    - name: restart mysql
+      service: name=mysql state=restarted
+
+    - name: start slave
+      mysql_replication: mode=startslave
